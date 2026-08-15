@@ -1,151 +1,256 @@
-# 保险销售客户端归因工具
+# Insurance Sales Client Attribution Tool
 
-**Spec 驱动的开放影响因子挖掘与贝叶斯实验归因 Agent。**
+[中文](README.zh-CN.md)
 
-面向保险自营平台的经营分析场景:当经营指标异常时(轮播 CTR 下降、保费月度波动),
-自动回答三个问题——**变了多少是真的、哪个因子造成的、下一步做什么实验**——
-并保证每条结论可验证、可追溯、不越权。
+**Spec-driven open factor mining and Bayesian experiment attribution agent.**
 
-## 核心能力
+Built for insurance platform operations analytics: when a business metric moves
+unexpectedly (carousel CTR drops, monthly premium fluctuates), the tool answers
+three questions — **how much of the change is real, which factor caused it, and
+what experiment to run next** — while keeping every conclusion verifiable,
+traceable, and within its evidence authority.
 
-两条归因线,全部结论经证据分级状态机与 Claim Ledger 约束:
+## Highlights
 
-- **组件归因(线 A)**:Growth UI Spec 三类 Diff → FactorMiner 开放候选扫描 →
-  贝叶斯 Bundle/HTE 估计 → 因子化实验设计。不穷举因子清单,从 Spec 差异中
-  开放地发现候选因子。
-- **实验基线归因(线 B)**:A/B 持续对照基线 + 变动注册表 + 外部事件关联标注,
-  把"我主动做的、外部发生的、用户自发的"显式分桶,残差诚实标注为"未知"。
+Two attribution lines, with every conclusion constrained by an evidence-graded
+state machine and a Claim Ledger:
 
-治理原则:
+- **Component attribution (Line A)**: Growth UI Spec diffs (Spec / Render /
+  Runtime) → open candidate discovery with FactorMiner → Bayesian bundle and
+  HTE estimation → factorial experiment design. The factor space is open:
+  candidates are discovered from spec differences, not enumerated by hand.
+- **Experiment baseline attribution (Line B)**: persistent A/B control baseline
+  + change registry + external-event alignment, bucketing each month's movement
+  into "what we did / what happened externally / unexplained residual" — with
+  the residual honestly labeled as unknown instead of being allocated away.
 
-- 无随机化证据时只输出 `ASSOCIATION_ONLY`,禁止因果动词
-- 外部因子恒为 `TEMPORAL_ASSOCIATION`,永不升级为因果
-- 高风险动作(回滚、放量)一律为建议状态,必须人工审批执行
-- 证据不足即拒答(`REFUSED` / `DATA_INSUFFICIENT`),不硬答
+Governance principles (not optional):
 
-## 快速开始
+- Without randomization, conclusions are `ASSOCIATION_ONLY` — causal verbs forbidden
+- External factors are always `TEMPORAL_ASSOCIATION`, never promoted to causal
+- High-risk actions (rollback, ramp-up, config changes) are suggestions
+  requiring human approval
+- Insufficient evidence means refusal (`REFUSED` / `DATA_INSUFFICIENT`), never
+  a hallucinated answer
 
-环境要求:Python 3.10+,仅依赖 `numpy`。
+## Architecture
+
+### Seven-agent governance pipeline
+
+| Agent | Responsibility | Artifacts |
+|---|---|---|
+| `intent` | Business question intent parsing | `AnalysisIntent` |
+| `metric_contract` | Metric definition governance (definition/window/granularity/version) | `MetricContract` |
+| `data_acquisition` | Read-only data profiling and quality validation | `QueryPlan`, `DataQualityReport` |
+| `diagnostic` | Funnel and structure diagnosis, segment profiling | `AttributionCandidateSet` |
+| `causal_evidence` | Causal-readiness grading and claim governance | `EvidenceReport`, `ClaimLedger` |
+| `experiment_planner` | Experiment and action planning with guardrails | `ExperimentSpec` |
+| `monitor_review` | Experiment monitoring and review | `MonitoringReport`, `PlaybookPatch` |
+
+Business state path (exception/recovery states omitted):
+
+```
+RECEIVED → INTENT_PARSED → METRIC_CONFIRMED → DATA_VALIDATED → DIAGNOSING
+→ EVIDENCE_GRADED → ACTION_DRAFTED → COMPLIANCE_REVIEWED → AWAITING_APPROVAL
+→ MONITORING → REVIEWED → CLOSED
+```
+
+When evidence is insufficient or authority is exceeded, tasks move to
+`DATA_INSUFFICIENT` / `DESCRIPTIVE_ONLY` / `BLOCKED_BY_GUARDRAIL` /
+`NEEDS_HUMAN` instead of producing an answer.
+
+### Claim Ledger: evidence-graded state machine
+
+Every attribution claim is promoted through 9 states, each with an explicit
+evidence threshold:
+
+```
+OBSERVED_ANOMALY → FACTORS_DISCOVERED → BUNDLE_EXPERIMENT_READY
+→ BUNDLE_EFFECT_ESTIMATED → HETEROGENEITY_RANKED
+→ COMPONENT_EXPERIMENT_DESIGNED → COMPONENT_EFFECT_ESTIMATED
+→ POSTERIOR_UPDATED → DECISION_READY
+```
+
+Four explicit refusal types: `ASSOCIATION_ONLY`, `FACTOR_SPACE_INCOMPLETE`,
+`EXPERIMENT_NOT_IDENTIFIED`, `INCONCLUSIVE_NEED_MORE_DATA`.
+
+### Factor experience store (cross-period learning)
+
+Attribution posteriors are written back after each period and loaded as
+informative priors for the next:
+
+- Stale experience decays by 0.5 per period with an upper cap
+- PID feedback adaptively tunes the shrinkage strength ν
+- Prior–data mismatch alarms trigger automatic degradation to flat estimation
+
+### Technical notes
+
+- **Pure numpy, single dependency** — no PyMC/scipy/frameworks; fully
+  reproducible offline
+- Zero LLM dependency in the statistical core; LLMs are only used for intent
+  parsing and report writing (replaceable; demos use rule templates)
+- Simulator ships with explicit DAG + structural equations, with **truth and
+  evaluation oracle separated**
+- Benchmarks are process-isolated; seeds and ground truth are never exposed
+  to the code under test
+
+## Quick Start
+
+Requires Python 3.10+ and numpy (`pip install -r requirements.txt`).
 
 ```bash
-# ① 线 A 端到端 demo + 7 seeds 基准(约 16 秒)
+# ① Line A end-to-end demo + 7-seed benchmark (~16 s)
 python3 -m attribution
 
-# ② 线 B 实验基线归因 + 5 seeds 验证
+# ② Line B experiment baseline attribution + 5-seed validation
 python3 -m attribution.baseline_attribution
 
-# ③ 经验库跨期学习消融(后验写回 + PID 自适应收缩 + 错配报警)
+# ③ Experience-store cross-period ablation (write-back + PID shrinkage + mismatch alarm)
 python3 -m attribution.experience_benchmark
 
-# ④ 多因子嵌套收缩 + 校准层 50 seeds 消融(约 90 秒)
+# ④ Nested shrinkage + calibration ablation, 50 seeds (~90 s)
 python3 -m attribution.nested_benchmark
 
-# ⑤ 公开外部事件时间线映射 + 覆盖率统计
+# ⑤ Public external-event timeline mapping + coverage stats
 python3 -m attribution.external_events
 
-# ⑥ 因果治理基准(进程隔离,3 seeds / 9 cases)
+# ⑥ Causal governance benchmark (process-isolated, 3 seeds / 9 cases)
 python3 -m runtime --benchmark --benchmark-seeds 3
 
-# ⑦ UCI 真实公开数据案例(首次运行自动下载,CC BY 4.0)
+# ⑦ Real public-data case (UCI Bank Marketing, CC BY 4.0, downloaded on first run)
 python3 -m runtime --fetch-real-data
 
-# ⑧ 本地控制台(REST API)
+# ⑧ Local console (REST API, default port 8765)
 python3 run_server.py 8765
 ```
 
-控制台 API:
+Generated evidence JSON goes to `outputs/` and runtime state to
+`runtime_data/`; both are local artifacts and are not distributed with the
+repository (see .gitignore).
+
+## Console API
 
 ```text
-GET /api/attribution/case?case=A|B|C        因果就绪度案例
-GET /api/attribution/bayes-case?case=C      门禁 + 贝叶斯决策层
-GET /api/attribution/line-b-review          线 B 月度归因 Evidence Pack
-GET /api/attribution/real-data              UCI 真实数据(需先下载)
-GET /api/attribution/scenarios              演示场景目录
-GET /api/attribution/scenario-run?scenario=line_a|line_b|external|bayes_case_a|experience
-GET /api/attribution/scenario-report?scenario=...   下载 Markdown 审计报告
-POST /api/attribution/chat                  多轮对话 Agent(意图→澄清→计划→确认→真实执行)
-  body: {"session_id": "demo", "message": "上个月注册量为什么掉了"}
+GET  /api/health                            Health check
+GET  /api/attribution/case?case=A|B|C       Causal-readiness cases (observational / missing metadata / randomized)
+GET  /api/attribution/benchmark?seeds=8     Process-isolated governance benchmark
+GET  /api/attribution/datasets              Public dataset provenance catalog
+GET  /api/attribution/bayes-case?case=C     Gate + Bayesian decision layer (refuses when the gate fails)
+GET  /api/attribution/line-b-review         Line B monthly attribution evidence pack
+GET  /api/attribution/real-data             UCI real data (requires --fetch-real-data first)
+GET  /api/attribution/scenarios             Demo scenario catalog
+GET  /api/attribution/scenario-run?scenario=line_a|line_b|external|bayes_case_a|experience
+GET  /api/attribution/scenario-report?scenario=...   Download Markdown audit report
+POST /api/attribution/chat                  Multi-turn agent chat (intent → clarify → plan → confirm → real execution)
+       body: {"session_id": "demo", "message": "上个月注册量为什么掉了"}
+       send "reset"/"重置" to clear the session
 ```
 
-## 目录结构
+## Repository Layout
 
 ```text
-attribution/                  # 归因方法包(纯 numpy)
-  bayes.py                    # Beta-Binomial 决策、层级 HTE、调节扫描
+attribution/                  # Attribution methods package (pure numpy)
+  bayes.py                    # Beta-Binomial decisions, hierarchical HTE, moderation scan
   spec.py                     # Growth UI Spec + SpecDiff/RenderDiff/RuntimeDiff
-  factor_miner.py             # 开放候选发现
-  experiment_designer.py      # 全因子/Resolution-IV 因子设计 + 组件效应
-  claim_ledger.py             # 证据分级状态机与晋升门禁
-  insursim_carousel.py        # 显式 DAG 仿真器(真值与 oracle 分离)
-  benchmark.py                # 贝叶斯专项评测(同构+错配,含分群预测 Brier)
-  baseline_attribution.py     # 线 B:基线归因 + 变动/外部注册 + 未知标注
-  experience_store.py         # 因子经验库:后验写回/跨期先验/PID 自适应收缩/错配报警
-  experience_benchmark.py     # 经验库跨期消融(流量爬坡 7 期)
-  calibration.py              # 分箱校准层(样本外可靠性映射)
-  nested_benchmark.py         # 嵌套池化 + 校准 50 seeds 消融
-  external_events.py          # 公开外部事件时间线 + 映射覆盖率
-  scenario_reports.py         # 控制台场景运行 + 审计报告渲染
-  agent_chat.py               # 多轮对话 Agent:Plan-and-Execute 状态机
-runtime/                      # 因果治理运行时(七 Agent 状态机 + 五层门禁)
-  cases.py                    # 因果就绪度案例 A/B/C 纵向切片
-  analysis.py                 # 确定性特征提取与因果就绪技能
-  benchmark.py                # 进程隔离基准(种子与真值不暴露给被测方)
-  real_data.py                # UCI Bank Marketing 适配器(SHA-256 锁定)
-  dataset_catalog.py          # 数据集来源目录
-  bayes_bridge.py             # 治理运行时 ↔ 贝叶斯层桥接
-  foundation.py               # 控制平面、证据包、检查点
-  cli.py / configuration.py   # CLI 入口与配置
-specs/                        # 轮播图 Growth UI Spec 两版本(可复用模板)
-scripts/                      # 基准结果绘图工具
-docs/methodology.md           # 每个机制的理论出处与改造边界
+  factor_miner.py             # Open candidate discovery
+  experiment_designer.py      # Full/Resolution-IV factorial designs + component effects
+  claim_ledger.py             # Evidence-graded state machine and promotion gates
+  insursim_carousel.py        # Explicit-DAG simulator (truth separated from oracle)
+  benchmark.py                # Bayesian benchmark (in-distribution + mismatch, segment Brier)
+  baseline_attribution.py     # Line B: baseline attribution + registries + unknown labeling
+  experience_store.py         # Factor experience store: write-back/priors/PID ν/mismatch alarm
+  experience_benchmark.py     # Cross-period ablation (7-period traffic ramp)
+  calibration.py              # Binned calibration layer (out-of-sample reliability mapping)
+  nested_benchmark.py         # Nested pooling + calibration ablation, 50 seeds
+  external_events.py          # Public external-event timeline + mapping coverage
+  scenario_reports.py         # Console scenario runner + audit report rendering
+  agent_chat.py               # Multi-turn chat agent: Plan-and-Execute state machine
+runtime/                      # Causal governance runtime (7-agent state machine + gates)
+  cases.py                    # Causal-readiness cases A/B/C vertical slice
+  analysis.py                 # Deterministic feature extraction and readiness skills
+  benchmark.py                # Process-isolated benchmark (seeds/truth hidden from the tested code)
+  real_data.py                # UCI Bank Marketing adapter (SHA-256 pinned)
+  dataset_catalog.py          # Dataset provenance catalog
+  bayes_bridge.py             # Governance runtime ↔ Bayesian layer bridge
+  foundation.py               # Control plane, evidence packs, checkpoints
+  cli.py / configuration.py   # CLI entry point and configuration
+specs/                        # Carousel Growth UI Spec, two versions (reusable templates)
+scripts/                      # Benchmark plotting utility
+docs/methodology.md           # Theoretical provenance and adaptation boundaries (Chinese)
 ```
 
-运行生成的证据 JSON 写入 `outputs/`,运行状态写入 `runtime_data/`,
-两者均为本地生成物,不随仓库分发(见 .gitignore)。
+## Sample Output
 
-## 样例:线 A 输出(轮播图异常归因)
+### Line A: carousel anomaly attribution
+
+Input: old style CTR 4.1% → new style 3.2%; two Growth UI Spec versions;
+impression-level logs (simulated).
 
 ```text
-BUNDLE_EFFECT: 整套新样式使 CTR 变化 -0.0166,P(实际损害)=1.000 → ROLLBACK_RECOMMENDED
-HETEROGENEOUS_TREATMENT_EFFECT: 低端设备分群负向效应最大(收缩后 -0.0272)
-COMPONENT_EFFECT: carousel.text_density = -0.0117;carousel.image_component = -0.0078(独立随机化)
-EXPERIMENT_INCONCLUSIVE ×3: layout / indicator_position / media_aspect_ratio 未达组件级证据标准
-状态机终态: DECISION_READY
+BUNDLE_EFFECT: new style bundle changes CTR by -0.0166, P(actual harm)=1.000 → ROLLBACK_RECOMMENDED
+HETEROGENEOUS_TREATMENT_EFFECT: low-end device segment harmed most (shrunk -0.0272)
+COMPONENT_EFFECT: carousel.text_density = -0.0117; carousel.image_component = -0.0078 (independent randomization)
+EXPERIMENT_INCONCLUSIVE ×3: layout / indicator_position / media_aspect_ratio below component-level evidence bar
+Final state: DECISION_READY
 ```
 
-## 评测指标(本地可复现)
+### Line B: monthly baseline attribution
 
-| 评测 | 指标 | 结果 |
+Input: 60-day control/treatment premium panel + change registry (2 entries) +
+external-event registry (1 entry).
+
+```text
+ATT summary: naive 116.4 → hierarchical 119.4 (truth 100, with experimental noise)
+External association: ext_regulation window deviation -86.2, claim_type=TEMPORAL_ASSOCIATION
+Governance alert: UNEXPLAINED_STEP_SUSPECTED (day 39/51; truth: unregistered change day 40 + drift)
+Unknown bucket: last-10-day mean -95.8, claim_type=UNEXPLAINED (not allocated)
+```
+
+## Evaluation Metrics
+
+All metrics are locally reproducible (see [Quick Start](#quick-start)):
+
+| Evaluation | Metric | Result |
 |---|---|---|
-| 仿真真值回测(5 seeds) | Recall@5 / ATE RMSE / CrI 覆盖率 / 决策准确率 | 1.00 / 0.001 / 1.00 / 1.00 |
-| 经验库跨期消融(7 期流量爬坡) | 冷启动期 ATE RMSE / 决策一致性 / 错配报警 | ↓10.9% / 无回退 / 精确触发无误报 |
-| 嵌套池化 + 校准(50 seeds 小样本) | 方向召回 嵌套 vs 扁平 / 校准 ECE / HTE 区间覆盖率 | 0.78 vs 0.16 / 0.155→0.038 / 77.8%→87.8% |
-| 外部事件映射(90 天面板) | 真值事件召回 / 未注册变动错挂 | 100% / 0 错挂 |
-| 治理基准(3 seeds / 9 cases) | 门禁准确率 / 错误因果断言率 / 拒答召回 | 1.00 / 0.00 / 1.00 |
-| UCI 真实数据(45,211 条) | 门禁识别无随机分配 + 泄漏变量标记 + 贝叶斯层拒答 | 全部正确 |
+| Simulated-truth backtest (5 seeds) | Recall@5 / ATE RMSE / CrI coverage / decision accuracy / HTE direction / factor recovery | 1.00 / 0.001 / 1.00 / 1.00 / 1.00 / 1.00 |
+| Mismatch backtest (2 seeds) | Decision & recovery / Brier | 1.00 held / 0.032→0.044 (near the Bernoulli variance floor) |
+| Experience-store ablation (7-period ramp) | Cold-start ATE RMSE / decision consistency / mismatch alarm | ↓10.9% / no regression / precise trigger, no false alarms |
+| Nested pooling + calibration (50 seeds, small samples) | Direction recall nested vs flat / calibration ECE / HTE 95% CI coverage | 0.78 vs 0.16 / 0.155→0.038 (−76%) / 77.8%→87.8% |
+| External-event mapping (90-day panel) | True-event recall / misattributed unregistered changes / coverage | 100% / 0 misattributed / 0.667 |
+| Governance benchmark (3 seeds / 9 cases) | Gate accuracy / false causal assertion rate / refusal recall | 1.00 / 0.00 / 1.00 |
+| Line B prototype (5 seeds) | Unregistered-change recall / external alignment / unknown honesty | 1.00 / 1.00 / 1.00 |
+| Shrinkage ablation | Moderation RMSE hierarchical vs naive | 0.0042 vs 0.0048 (in-dist); 5.55 vs 10.23 (Line B, ↓46%) |
+| UCI real data (45,211 rows) | Detects no randomization + leakage variable flagging + Bayesian-layer refusal | All correct |
 
-## 数据来源与授权
+## Data Sources and Licensing
 
-| 数据 | 来源 | 授权 | 处理方式 |
+| Data | Source | License | Handling |
 |---|---|---|---|
-| 仿真数据(轮播场景生成器) | 本仓库内置生成器 | 自有 | 显式 DAG + 结构方程公开;真值与评测 oracle 分离;仅用于方法验证,不声称代表真实因果 |
-| UCI Bank Marketing | UCI ML Repository(doi:10.24432/C5K306) | CC BY 4.0 | 只读分析;行级数据不含可识别个人信息;运行时下载,不随仓库分发 |
-| Growth UI Spec 示例 | 本仓库编写(参考 OpenUI/WICG 公开草案思想) | 自有 | 模板可复用 |
-| 公开外部事件时间线(LPR 调整、报行合一、618、开学季) | 公开发布/公开日历 | 公开信息 | 仅作外生事件示例与映射演示;生产接入需对接正式数据源 |
+| Simulated data (carousel scenario generator) | In-repo generator | Own work | Explicit DAG + structural equations published; truth separated from evaluation oracle; method validation only, no real-world causal claim |
+| UCI Bank Marketing | UCI ML Repository (doi:10.24432/C5K306) | CC BY 4.0 | Read-only analysis; no identifiable personal information; downloaded at runtime, not shipped |
+| Growth UI Spec examples | Written for this repo (informed by public OpenUI/WICG draft ideas) | Own work | Reusable templates |
+| Public external-event timeline (LPR adjustments, industry regulatory actions, shopping festivals, school season) | Public releases / calendars | Public information | Illustrative exogenous events only; production use requires an official data feed |
 
-## 合规边界
+## Compliance Boundaries
 
-- 系统**不做**承保、理赔、精算、风控、授信、投资判断或保险赔付结论
-- 不做个人级保险推荐、个人营销名单;所有分群分析聚合到小分群抑制阈值以上
-- 无随机化证据时只输出关联级结论并附非因果警告;外部因子永不升级为因果
-- 高风险动作(回滚、放量、配置变更)一律为建议状态,必须人工审批执行
-- 结论带 claim_type、证据引用、后验不确定性;错误结论可撤回并留痕
+- The system does **not** make underwriting, claims, actuarial, risk-control,
+  credit, investment, or payout decisions
+- No individual-level insurance recommendations or marketing lists; all
+  segment analysis is aggregated above small-cell suppression thresholds
+- Without randomization, only associational conclusions are emitted, with
+  non-causal warnings; external factors are never upgraded to causal
+- High-risk actions (rollback, ramp-up, config changes) are suggestions
+  requiring human approval
+- Demos and evaluations use synthetic and CC BY 4.0 public data only; no real
+  user data is included
 
-## 文档
+## Documentation
 
-- [方法依据与借鉴边界](docs/methodology.md) — 每个核心机制的理论出处、
-  借鉴了什么、没有照搬什么(部分池化、DoWhy/EconML 对标、AB 决策引擎对标)
+- [Methodology and adaptation boundaries](docs/methodology.md) (Chinese) —
+  theoretical provenance of each mechanism, what was borrowed, and what was
+  deliberately not copied (partial pooling, DoWhy/EconML comparison, A/B
+  decision-engine comparison)
 
 ## License
 
-代码:[Apache-2.0](LICENSE);文档:CC BY 4.0。
+Code: [Apache-2.0](LICENSE); documentation: CC BY 4.0.
