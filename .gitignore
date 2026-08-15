@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# 本地运行生成物(证据输出与运行状态,不随仓库分发)
+outputs/
+runtime_data/
